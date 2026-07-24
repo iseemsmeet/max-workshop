@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Max's Workshop</title>
+<style>
+  :root{
+    --bg:#0a0f0a; --panel:#0f1a10; --accent:#5dff8f; --accent-dim:#1e5c33;
+    --grid:#173321; --text:#c9f2d4; --text-dim:#5f8a6c; --amber:#ffb454;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:'SF Mono','Courier New',monospace; line-height:1.5;
+  }
+  a{ color:inherit; text-decoration:none; }
+  header{
+    padding:20px 24px; border-bottom:1px solid var(--grid);
+    display:flex; align-items:center; justify-content:space-between; position:sticky; top:0; background:var(--bg); z-index:10;
+  }
+  header .logo{ font-size:15px; letter-spacing:1.5px; text-transform:uppercase; font-weight:700; cursor:pointer; }
+  header .logo span{ color:var(--accent); }
+  nav.breadcrumb{ font-size:11px; color:var(--text-dim); }
+  nav.breadcrumb a:hover{ color:var(--accent); }
+  main{ max-width:920px; margin:0 auto; padding:36px 24px 80px; }
+
+  /* ---- home ---- */
+  .hero{ margin-bottom:40px; }
+  .hero h1{ font-size:28px; margin:0 0 8px; }
+  .hero p{ color:var(--text-dim); font-size:14px; max-width:520px; }
+  .hero .signature{ color:var(--accent); font-size:13px; margin-top:14px; font-style:italic; }
+
+  .grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(240px,1fr)); gap:16px; }
+  .tile{
+    background:var(--panel); border:1px solid var(--grid); border-radius:8px;
+    padding:20px; cursor:pointer; transition:border-color .15s;
+  }
+  .tile:hover{ border-color:var(--accent-dim); }
+  .tile .eyebrow{ font-size:10px; letter-spacing:1.5px; color:var(--text-dim); text-transform:uppercase; margin-bottom:8px; }
+  .tile h3{ margin:0 0 6px; font-size:16px; color:var(--accent); }
+  .tile p{ margin:0; font-size:12.5px; color:var(--text-dim); }
+  .tile .count{ margin-top:12px; font-size:11px; color:var(--text-dim); }
+
+  /* ---- project detail ---- */
+  .project-header{ margin-bottom:28px; }
+  .project-header .eyebrow{ font-size:10px; letter-spacing:1.5px; color:var(--amber); text-transform:uppercase; margin-bottom:8px; }
+  .project-header h1{ font-size:24px; margin:0 0 8px; }
+  .project-header .tagline{ color:var(--text-dim); font-size:14px; }
+
+  section.block{ margin-top:32px; }
+  section.block h2{
+    font-size:12px; letter-spacing:1.5px; text-transform:uppercase; color:var(--accent);
+    border-bottom:1px solid var(--grid); padding-bottom:8px; margin-bottom:16px;
+  }
+  .steps{ list-style:none; margin:0; padding:0; counter-reset:step; }
+  .steps li{
+    counter-increment:step; padding:10px 0 10px 34px; position:relative; font-size:13.5px;
+    border-bottom:1px solid var(--grid);
+  }
+  .steps li:last-child{ border-bottom:none; }
+  .steps li::before{
+    content:counter(step); position:absolute; left:0; top:9px;
+    width:22px; height:22px; border:1px solid var(--accent-dim); border-radius:50%;
+    display:flex; align-items:center; justify-content:center; font-size:11px; color:var(--accent);
+  }
+  .actions{ display:flex; gap:10px; margin-top:28px; flex-wrap:wrap; }
+  .btn{
+    background:var(--accent); color:#04170a; padding:12px 20px; border-radius:6px;
+    font-size:12px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+  }
+  .btn.secondary{ background:transparent; border:1px solid var(--grid); color:var(--text-dim); }
+  .empty{ color:var(--text-dim); font-size:13px; padding:30px 0; text-align:center; border:1px dashed var(--grid); border-radius:8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="location.hash='#/'">MAX'S <span>WORKSHOP</span></div>
+  <nav class="breadcrumb" id="breadcrumb"></nav>
+</header>
+
+<main id="app"></main>
+
+<script>
+/* =========================================================
+   ADD NEW CATEGORIES HERE
+   ========================================================= */
+const CATEGORIES = [
+  { id: 'hardware', label: 'Hardware Projects', desc: 'Circuits, sensors, and things that blink, spin, or sense the physical world.' },
+  { id: 'coding',   label: 'Coding Projects',   desc: 'Software builds, tools, and experiments — no soldering required.' },
+];
+
+/* =========================================================
+   ADD NEW PROJECTS HERE
+   Each project needs: id, category (must match a CATEGORIES id),
+   title, tagline, description, roadmap (array of steps),
+   buildGuide (array of steps, optional), demoUrl (optional),
+   codeUrl (optional)
+   ========================================================= */
+const PROJECTS = [
+  {
+    id: 'optical-oscilloscope',
+    category: 'hardware',
+    title: 'Optical Oscilloscope (Digital, Smartphone-Based)',
+    tagline: 'One Arduino Uno, one LED, and a phone camera that reads the waveform back',
+    description: 'Built entirely around a single microcontroller (Arduino Uno) — no extra boards or modules. A push button and two potentiometers drive a white LED through sine, triangle, square, and sawtooth brightness patterns. A phone camera watches the LED and a browser-based classifier figures out which waveform is playing, then plots it back out live as a frequency, amplitude, and waveform-name readout on a digital oscilloscope display — all running in the same web app.',
+    roadmap: [
+      'Wire the Arduino: white LED on a PWM pin, push button on a digital pin, two potentiometers on analog pins.',
+      'Flash the LED-driver sketch and verify all four waveforms look correct on the Serial Plotter.',
+      'Build the camera capture page: request the phone camera, sample LED brightness every frame into a rolling buffer.',
+      'Add period detection (autocorrelation) and shape classification (template matching against ideal waveforms).',
+      'Render the live oscilloscope trace and readouts on a canvas.',
+      'Tune real-world lighting/exposure until classification is reliable.',
+    ],
+    buildGuide: [
+      'White LED + 220-330Ω resistor → PWM pin, other leg to GND.',
+      'Push button → digital pin (INPUT_PULLUP) and GND, opposite corner legs.',
+      'Potentiometer 1 (frequency) → outer legs to 5V/GND, wiper to an analog pin.',
+      'Potentiometer 2 (amplitude) → same pattern, second analog pin.',
+    ],
+    demoUrl: 'optical_oscilloscope.html',
+    codeUrl: '',
+  },
+];
+
+/* =========================================================
+   Routing + rendering — you shouldn't need to touch this
+   ========================================================= */
+const app = document.getElementById('app');
+const breadcrumb = document.getElementById('breadcrumb');
+
+function route() {
+  const hash = location.hash || '#/';
+  const parts = hash.replace('#/', '').split('/').filter(Boolean);
+
+  if (parts.length === 0) return renderHome();
+  if (parts[0] === 'category' && parts[1]) return renderCategory(parts[1]);
+  if (parts[0] === 'project' && parts[1]) return renderProject(parts[1]);
+  renderHome();
+}
+
+function renderHome() {
+  breadcrumb.innerHTML = '';
+  app.innerHTML = `
+    <div class="hero">
+      <h1>Welcome to the hub.</h1>
+      <p>We have the categories you're looking for: Code Projects, Hardware Projects.</p>
+      <p>All of these are projects built by the owner and friends — new ideas implemented after proper research, made to be useful for everyone.</p>
+      <div class="signature">— Max</div>
+    </div>
+    <div class="grid">
+      ${CATEGORIES.map(c => {
+        const count = PROJECTS.filter(p => p.category === c.id).length;
+        return `
+        <a class="tile" href="#/category/${c.id}">
+          <div class="eyebrow">Category</div>
+          <h3>${c.label}</h3>
+          <p>${c.desc}</p>
+          <div class="count">${count} project${count === 1 ? '' : 's'}</div>
+        </a>`;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderCategory(catId) {
+  const cat = CATEGORIES.find(c => c.id === catId);
+  if (!cat) return renderHome();
+  const projects = PROJECTS.filter(p => p.category === catId);
+
+  breadcrumb.innerHTML = `<a href="#/">Home</a> / ${cat.label}`;
+  app.innerHTML = `
+    <div class="hero">
+      <h1>${cat.label}</h1>
+      <p>${cat.desc}</p>
+    </div>
+    ${projects.length ? `<div class="grid">
+      ${projects.map(p => `
+        <a class="tile" href="#/project/${p.id}">
+          <div class="eyebrow">Project</div>
+          <h3>${p.title}</h3>
+          <p>${p.tagline}</p>
+        </a>`).join('')}
+    </div>` : `<div class="empty">No projects here yet — add one to the PROJECTS list.</div>`}
+  `;
+}
+
+function renderProject(projId) {
+  const p = PROJECTS.find(x => x.id === projId);
+  if (!p) return renderHome();
+  const cat = CATEGORIES.find(c => c.id === p.category);
+
+  breadcrumb.innerHTML = `<a href="#/">Home</a> / <a href="#/category/${cat.id}">${cat.label}</a> / ${p.title}`;
+  app.innerHTML = `
+    <div class="project-header">
+      <div class="eyebrow">${cat.label}</div>
+      <h1>${p.title}</h1>
+      <div class="tagline">${p.tagline}</div>
+    </div>
+    <p>${p.description}</p>
+
+    <section class="block">
+      <h2>Roadmap</h2>
+      <ol class="steps">${p.roadmap.map(s => `<li>${s}</li>`).join('')}</ol>
+    </section>
+
+    ${p.buildGuide ? `
+    <section class="block">
+      <h2>Hardware Build Guide</h2>
+      <ol class="steps">${p.buildGuide.map(s => `<li>${s}</li>`).join('')}</ol>
+    </section>` : ''}
+
+    <div class="actions">
+      ${p.demoUrl ? `<a class="btn" href="${p.demoUrl}" target="_blank">Launch App</a>` : ''}
+      ${p.codeUrl ? `<a class="btn secondary" href="${p.codeUrl}" target="_blank">View Code</a>` : ''}
+    </div>
+  `;
+}
+
+window.addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>
