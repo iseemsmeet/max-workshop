@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Optical Oscilloscope</title>
+<style>
+  :root{
+    --bg:#0a0f0a;
+    --panel:#0f1a10;
+    --trace:#5dff8f;
+    --trace-dim:#1e5c33;
+    --grid:#173321;
+    --text:#c9f2d4;
+    --text-dim:#5f8a6c;
+    --amber:#ffb454;
+    --red:#ff6b6b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:'SF Mono', 'Courier New', monospace;
+    -webkit-tap-highlight-color: transparent;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header{
+    padding:14px 16px 6px; display:flex; align-items:baseline; justify-content:space-between;
+  }
+  header h1{ font-size:15px; letter-spacing:1.5px; margin:0; font-weight:600; color:var(--text); text-transform:uppercase;}
+  header .status{ font-size:11px; color:var(--text-dim); }
+  #video{ display:none; }
+  .panel{
+    margin:10px 14px; background:var(--panel); border:1px solid var(--grid);
+    border-radius:6px; padding:10px;
+  }
+  #scope{ width:100%; height:220px; display:block; border-radius:4px; }
+  .readouts{
+    display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px;
+  }
+  .readout{ background:#081209; border:1px solid var(--grid); border-radius:4px; padding:8px 10px; text-align:center; }
+  .readout .label{ font-size:9px; letter-spacing:1px; color:var(--text-dim); text-transform:uppercase; }
+  .readout .value{ font-size:18px; margin-top:3px; color:var(--trace); font-weight:600; }
+  .readout .value.warn{ color:var(--amber); }
+  .controls{ display:flex; gap:10px; margin:10px 14px; }
+  button{
+    flex:1; background:var(--trace); color:#04170a; border:none; border-radius:6px;
+    padding:13px; font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+    font-family:inherit; -webkit-appearance:none;
+  }
+  button:active{ background:#3fdc73; }
+  button.secondary{ background:transparent; border:1px solid var(--grid); color:var(--text-dim); }
+  .note{ margin:8px 14px 16px; font-size:11px; color:var(--text-dim); line-height:1.5; }
+  .dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; background:var(--text-dim); }
+  .dot.live{ background:var(--trace); box-shadow:0 0 6px var(--trace); }
+  .dot.transition{ background:var(--amber); box-shadow:0 0 6px var(--amber); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Optical Oscilloscope</h1>
+  <div class="status" id="statusText"><span class="dot" id="statusDot"></span><span id="statusLabel">idle</span></div>
+</header>
+
+<video id="video" playsinline muted autoplay></video>
+<canvas id="sampler" style="display:none;"></canvas>
+
+<div class="panel">
+  <canvas id="scope"></canvas>
+  <div class="readouts">
+    <div class="readout"><div class="label">Waveform</div><div class="value" id="outWave">--</div></div>
+    <div class="readout"><div class="label">Freq (Hz)</div><div class="value" id="outFreq">--</div></div>
+    <div class="readout"><div class="label">Amplitude</div><div class="value" id="outAmp">--</div></div>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="startBtn">Start Camera</button>
+  <button class="secondary" id="testBtn">Test Mode (No Hardware)</button>
+  <button class="secondary" id="resetBtn">Reset</button>
+</div>
+
+<div class="note">
+  Point the rear camera directly at the white LED, close enough that it fills a good part of the frame. If auto-exposure fights the signal (readouts jitter wildly even on a steady waveform), try dimming ambient light or partially covering the LED with paper to diffuse it.
+</div>
+
+<script>
+(() => {
+  const video = document.getElementById('video');
+  const sampler = document.getElementById('sampler');
+  const sctx = sampler.getContext('2d', { willReadFrequently: true });
+  const scope = document.getElementById('scope');
+  const scopeCtx = scope.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const testBtn = document.getElementById('testBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusLabel = document.getElementById('statusLabel');
+  const outWave = document.getElementById('outWave');
+  const outFreq = document.getElementById('outFreq');
+  const outAmp = document.getElementById('outAmp');
+
+  // ---- config ----
+  const SAMPLE_SIZE = 24;          // px, tiny crop for fast averaging
+  const BUFFER_MS = 3000;          // rolling window kept for display/analysis
+  const ANALYSIS_INTERVAL_MS = 200;
+  const MIN_FREQ = 0.3, MAX_FREQ = 4.0; // matches Arduino's 0.5-3Hz range with margin
+  const RESAMPLE_HZ = 60;          // uniform timebase for autocorrelation
+  const CYCLE_POINTS = 32;         // resolution for shape template matching
+  const PERIOD_CHANGE_THRESHOLD = 0.30; // 30% jump => treat as new signal
+
+  let buffer = [];                 // {t, b} raw samples
+  let running = false;
+  let lastAnalysis = 0;
+  let lastStablePeriodMs = null;
+  let transitionFlag = false;
+  let testMode = false;
+  let testWaveIdx = 0;
+  let lastTestSwitch = 0;
+  const TEST_NAMES = ['SINE', 'TRIANGLE', 'SQUARE', 'SAWTOOTH'];
+  const TEST_FREQ = 1.5; // Hz - matches the Arduino's fixed/typical range
+
+  function setStatus(text, mode) {
+    statusLabel.textContent = text;
+    statusDot.className = 'dot' + (mode ? ' ' + mode : '');
+  }
+
+  async function startCamera() {
+    try {
+      setStatus('requesting camera...', '');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          frameRate: { ideal: 60, min: 30 }
+        },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+
+      // Best-effort exposure lock - support varies widely by browser/device
+      try {
+        const track = stream.getVideoTracks()[0];
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        if (caps.exposureMode && caps.exposureMode.includes('manual')) {
+          await track.applyConstraints({ advanced: [{ exposureMode: 'manual' }] });
+        }
+        if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('manual')) {
+          await track.applyConstraints({ advanced: [{ whiteBalanceMode: 'manual' }] });
+        }
+      } catch (e) { /* not supported on this browser - proceed anyway */ }
+
+      sampler.width = SAMPLE_SIZE;
+      sampler.height = SAMPLE_SIZE;
+      running = true;
+      setStatus('capturing', 'live');
+      startBtn.textContent = 'Stop Camera';
+      requestAnimationFrame(sampleLoop);
+    } catch (err) {
+      setStatus('camera error: ' + err.message, '');
+    }
+  }
+
+  function stopCamera() {
+    running = false;
+    const stream = video.srcObject;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+    setStatus('idle', '');
+    startBtn.textContent = 'Start Camera';
+  }
+
+  function sampleLoop(now) {
+    if (!running) return;
+    if (video.readyState >= 2) {
+      // draw center crop of video frame into tiny canvas, average its brightness
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (vw && vh) {
+        const cropSize = Math.min(vw, vh) * 0.25; // center 25% region
+        const sx = (vw - cropSize) / 2, sy = (vh - cropSize) / 2;
+        sctx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+        const frame = sctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data;
+        let sum = 0, n = frame.length / 4;
+        for (let i = 0; i < frame.length; i += 4) {
+          sum += 0.299 * frame[i] + 0.587 * frame[i + 1] + 0.114 * frame[i + 2];
+        }
+        const brightness = sum / n;
+        buffer.push({ t: performance.now(), b: brightness });
+        const cutoff = performance.now() - BUFFER_MS;
+        while (buffer.length && buffer[0].t < cutoff) buffer.shift();
+      }
+    }
+
+    const nowMs = performance.now();
+    if (nowMs - lastAnalysis > ANALYSIS_INTERVAL_MS) {
+      lastAnalysis = nowMs;
+      analyze();
+    }
+    drawScope();
+    requestAnimationFrame(sampleLoop);
+  }
+
+  function startTestMode() {
+    stopCamera();
+    buffer = [];
+    testMode = true;
+    testWaveIdx = 0;
+    lastTestSwitch = performance.now();
+    setStatus('test mode (simulated signal)', 'live');
+    testBtn.textContent = 'Stop Test Mode';
+    requestAnimationFrame(testLoop);
+  }
+
+  function stopTestMode() {
+    testMode = false;
+    setStatus('idle', '');
+    testBtn.textContent = 'Test Mode (No Hardware)';
+  }
+
+  function testLoop(nowMs) {
+    if (!testMode) return;
+
+    // cycle through all four waveforms automatically so you can watch
+    // classification react to each one without touching real hardware
+    if (nowMs - lastTestSwitch > 6000) {
+      testWaveIdx = (testWaveIdx + 1) % 4;
+      lastTestSwitch = nowMs;
+    }
+
+    const p = ((nowMs / 1000) * TEST_FREQ) % 1;
+    let val;
+    switch (TEST_NAMES[testWaveIdx]) {
+      case 'SINE': val = (Math.sin(2 * Math.PI * p) + 1) / 2; break;
+      case 'TRIANGLE': val = 1 - Math.abs(2 * p - 1); break;
+      case 'SQUARE': val = p < 0.5 ? 1 : 0; break;
+      case 'SAWTOOTH': val = p; break;
+    }
+    const noise = (Math.random() - 0.5) * 0.05; // simulated camera/sensor noise
+    const brightness = 40 + Math.max(0, Math.min(1, val + noise)) * 200;
+
+    buffer.push({ t: performance.now(), b: brightness });
+    const cutoff = performance.now() - BUFFER_MS;
+    while (buffer.length && buffer[0].t < cutoff) buffer.shift();
+
+    const nowCheck = performance.now();
+    if (nowCheck - lastAnalysis > ANALYSIS_INTERVAL_MS) {
+      lastAnalysis = nowCheck;
+      analyze();
+    }
+    drawScope();
+    requestAnimationFrame(testLoop);
+  }
+
+  // ---- uniform resampling ----
+  function resampleUniform(buf, hz) {
+    if (buf.length < 4) return null;
+    const dt = 1000 / hz;
+    const t0 = buf[0].t, t1 = buf[buf.length - 1].t;
+    const n = Math.floor((t1 - t0) / dt);
+    if (n < 8) return null;
+    const out = new Float32Array(n);
+    let j = 0;
+    for (let i = 0; i < n; i++) {
+      const t = t0 + i * dt;
+      while (j < buf.length - 2 && buf[j + 1].t < t) j++;
+      const a = buf[j], b = buf[j + 1] || a;
+      const span = (b.t - a.t) || 1;
+      const frac = (t - a.t) / span;
+      out[i] = a.b + (b.b - a.b) * frac;
+    }
+    return out;
+  }
+
+  // ---- autocorrelation period detection ----
+  function detectPeriodSamples(sig, hz) {
+    const n = sig.length;
+    const minLag = Math.floor(hz / MAX_FREQ);
+    const maxLag = Math.min(Math.floor(hz / MIN_FREQ), Math.floor(n / 2));
+    if (maxLag <= minLag) return null;
+
+    const mean = sig.reduce((a, v) => a + v, 0) / n;
+    const centered = new Float32Array(n);
+    for (let i = 0; i < n; i++) centered[i] = sig[i] - mean;
+
+    let bestLag = -1, bestScore = -Infinity;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let s = 0;
+      const count = n - lag;
+      for (let i = 0; i < count; i++) s += centered[i] * centered[i + lag];
+      s /= count;
+      if (s > bestScore) { bestScore = s; bestLag = lag; }
+    }
+    if (bestScore <= 0) return null;
+    return bestLag;
+  }
+
+  // ---- shape templates (normalized 0..1 over one cycle) ----
+  function template(name, n) {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = i / n;
+      switch (name) {
+        case 'SINE': out[i] = (Math.sin(2 * Math.PI * p) + 1) / 2; break;
+        case 'TRIANGLE': out[i] = 1 - Math.abs(2 * p - 1); break;
+        case 'SQUARE': out[i] = p < 0.5 ? 1 : 0; break;
+        case 'SAWTOOTH': out[i] = p; break;
+      }
+    }
+    return out;
+  }
+
+  function normalize(arr) {
+    const n = arr.length;
+    const mean = arr.reduce((a, v) => a + v, 0) / n;
+    let variance = 0;
+    for (let i = 0; i < n; i++) variance += (arr[i] - mean) ** 2;
+    const std = Math.sqrt(variance / n) || 1;
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = (arr[i] - mean) / std;
+    return out;
+  }
+
+  function maxCircularCorrelation(a, b) {
+    const n = a.length;
+    let best = -Infinity;
+    for (let shift = 0; shift < n; shift++) {
+      let s = 0;
+      for (let i = 0; i < n; i++) s += a[i] * b[(i + shift) % n];
+      s /= n;
+      if (s > best) best = s;
+    }
+    return best;
+  }
+
+  function classifyShape(cycleSamples) {
+    const norm = normalize(cycleSamples);
+    const names = ['SINE', 'TRIANGLE', 'SQUARE', 'SAWTOOTH'];
+    let best = null, bestScore = -Infinity;
+    for (const name of names) {
+      const tmpl = normalize(template(name, cycleSamples.length));
+      const score = maxCircularCorrelation(norm, tmpl);
+      if (score > bestScore) { bestScore = score; best = name; }
+    }
+    return { shape: best, confidence: bestScore };
+  }
+
+  function analyze() {
+    const sig = resampleUniform(buffer, RESAMPLE_HZ);
+    if (!sig) { outWave.textContent = '--'; return; }
+
+    const periodSamples = detectPeriodSamples(sig, RESAMPLE_HZ);
+    if (!periodSamples) { outWave.textContent = '--'; return; }
+
+    const periodMs = (periodSamples / RESAMPLE_HZ) * 1000;
+    const freqHz = 1000 / periodMs;
+
+    // detect a signal transition: period jumped significantly from last stable reading
+    if (lastStablePeriodMs !== null) {
+      const change = Math.abs(periodMs - lastStablePeriodMs) / lastStablePeriodMs;
+      if (change > PERIOD_CHANGE_THRESHOLD) {
+        transitionFlag = true;
+        setStatus('new signal detected...', 'transition');
+        buffer = buffer.slice(-Math.floor(periodSamples * 2)); // keep only recent, discard stale mix
+        lastStablePeriodMs = periodMs;
+        return; // wait one more cycle for things to settle before classifying
+      }
+    }
+    lastStablePeriodMs = periodMs;
+    if (transitionFlag) { transitionFlag = false; setStatus('capturing', 'live'); }
+
+    // pull the most recent full cycle and resample it to CYCLE_POINTS
+    const cycleLenSamples = Math.min(periodSamples, sig.length);
+    const cycleRaw = sig.slice(sig.length - cycleLenSamples);
+    const cycle = new Float32Array(CYCLE_POINTS);
+    for (let i = 0; i < CYCLE_POINTS; i++) {
+      const idx = Math.floor((i / CYCLE_POINTS) * cycleRaw.length);
+      cycle[i] = cycleRaw[idx];
+    }
+
+    const { shape, confidence } = classifyShape(cycle);
+    const amplitude = Math.max(...cycleRaw) - Math.min(...cycleRaw);
+
+    outWave.textContent = shape;
+    outFreq.textContent = freqHz.toFixed(2);
+    outAmp.textContent = amplitude.toFixed(0);
+    outWave.classList.toggle('warn', confidence < 0.5);
+  }
+
+  // ---- oscilloscope render ----
+  function drawScope() {
+    const w = scope.clientWidth, h = scope.clientHeight;
+    if (scope.width !== w) scope.width = w;
+    if (scope.height !== h) scope.height = h;
+    scopeCtx.clearRect(0, 0, w, h);
+
+    // grid
+    scopeCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid');
+    scopeCtx.lineWidth = 1;
+    for (let x = 0; x < w; x += w / 10) { scopeCtx.beginPath(); scopeCtx.moveTo(x, 0); scopeCtx.lineTo(x, h); scopeCtx.stroke(); }
+    for (let y = 0; y < h; y += h / 6) { scopeCtx.beginPath(); scopeCtx.moveTo(0, y); scopeCtx.lineTo(w, y); scopeCtx.stroke(); }
+
+    if (buffer.length < 2) return;
+    const values = buffer.map(p => p.b);
+    const min = Math.min(...values), max = Math.max(...values);
+    const range = (max - min) || 1;
+    const t0 = buffer[0].t, t1 = buffer[buffer.length - 1].t;
+    const tSpan = (t1 - t0) || 1;
+
+    scopeCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--trace');
+    scopeCtx.lineWidth = 2;
+    scopeCtx.beginPath();
+    buffer.forEach((p, i) => {
+      const x = ((p.t - t0) / tSpan) * w;
+      const y = h - ((p.b - min) / range) * (h * 0.85) - h * 0.075;
+      if (i === 0) scopeCtx.moveTo(x, y); else scopeCtx.lineTo(x, y);
+    });
+    scopeCtx.stroke();
+  }
+
+  startBtn.addEventListener('click', () => running ? stopCamera() : startCamera());
+  testBtn.addEventListener('click', () => testMode ? stopTestMode() : startTestMode());
+  resetBtn.addEventListener('click', () => {
+    buffer = [];
+    lastStablePeriodMs = null;
+    outWave.textContent = '--'; outFreq.textContent = '--'; outAmp.textContent = '--';
+  });
+
+  setStatus('idle', '');
+})();
+</script>
+</body>
+</html>
