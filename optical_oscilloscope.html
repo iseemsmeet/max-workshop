@@ -378,6 +378,21 @@
     return { shape: best, confidence: bestScore };
   }
 
+  // How much of the cycle sits near the two extremes (fully bright / fully dim)
+  // rather than mid-range. A true square wave - even one with softened edges from
+  // camera auto-exposure lag - still spends most of its time at the extremes,
+  // which curve-correlation alone can miss when edges get rounded toward a ramp shape.
+  function extremesFraction(cycleSamples) {
+    const min = Math.min(...cycleSamples), max = Math.max(...cycleSamples);
+    const range = (max - min) || 1;
+    let count = 0;
+    for (const v of cycleSamples) {
+      const n = (v - min) / range;
+      if (n < 0.2 || n > 0.8) count++;
+    }
+    return count / cycleSamples.length;
+  }
+
   function analyze() {
     const sigRaw = resampleUniform(buffer, RESAMPLE_HZ);
     if (!sigRaw) return; // not enough data yet - leave prior readout as-is rather than blanking it
@@ -440,13 +455,18 @@
 
     const { shape, confidence } = classifyShape(cycle);
 
+    // if the signal spends most of its time pinned at the extremes, it's a square
+    // wave even if edge-softening made the correlation match lean toward sawtooth
+    const extremesFrac = extremesFraction(cycle);
+    const finalShape = (extremesFrac > 0.75) ? 'SQUARE' : shape;
+
     // classification hysteresis: only update the displayed waveform once a
     // majority of recent passes agree - a single misread doesn't flicker the readout
-    shapeHistory.push(shape);
+    shapeHistory.push(finalShape);
     if (shapeHistory.length > SHAPE_HISTORY_LEN) shapeHistory.shift();
     const counts = {};
     shapeHistory.forEach(s => counts[s] = (counts[s] || 0) + 1);
-    let majorityShape = shape, majorityCount = 0;
+    let majorityShape = finalShape, majorityCount = 0;
     for (const s in counts) { if (counts[s] > majorityCount) { majorityCount = counts[s]; majorityShape = s; } }
 
     const amplitude = Math.max(...cycleRaw) - Math.min(...cycleRaw);
