@@ -112,7 +112,6 @@
   const PERIOD_CHANGE_THRESHOLD = 0.30; // 30% jump => candidate new signal
 
   // -- stability / noise-handling --
-  const SMOOTH_WINDOW = 7;              // moving-average width (samples) to strip camera/frame noise
   const PERIOD_HISTORY_LEN = 6;         // recent period estimates kept for median filtering
   const PERIOD_SMOOTH_ALPHA = 0.25;     // how fast the displayed frequency tracks new readings (lower = steadier)
   const SHAPE_HISTORY_LEN = 5;          // recent classifications kept for majority vote
@@ -126,6 +125,7 @@
   let periodHistory = [];
   let shapeHistory = [];
   let transitionCounter = 0;
+  let scopeOverlay = null; // {sig, t0, dt} - the cleaned signal drawScope() overlays
   let testMode = false;
   let testWaveIdx = 0;
   let lastTestSwitch = 0;
@@ -381,10 +381,11 @@
   function analyze() {
     const sigRaw = resampleUniform(buffer, RESAMPLE_HZ);
     if (!sigRaw) return; // not enough data yet - leave prior readout as-is rather than blanking it
+    const bufferT0 = buffer[0].t; // capture now, before any buffer mutation below
 
-    const sig = movingAverage(sigRaw, SMOOTH_WINDOW); // noise-filtered signal used for detection/classification
-
-    const periodSamples = detectPeriodSamples(sig, RESAMPLE_HZ);
+    // light, fixed smoothing just to find the period without single-frame spikes throwing it off
+    const lightSig = movingAverage(sigRaw, 3);
+    const periodSamples = detectPeriodSamples(lightSig, RESAMPLE_HZ);
     if (!periodSamples) return;
 
     const periodMsRaw = (periodSamples / RESAMPLE_HZ) * 1000;
@@ -422,8 +423,14 @@
 
     const freqHz = 1000 / lastStablePeriodMs;
 
-    // extract the most recent cycle from the smoothed signal
-    const cycleLenSamples = Math.min(Math.round((lastStablePeriodMs / 1000) * RESAMPLE_HZ), sig.length);
+    // adaptive smoothing: scaled to the detected cycle length instead of a fixed
+    // sample count, so short/fast cycles don't get over-smoothed into looking like sine
+    const periodSamplesStable = Math.max(4, Math.round((lastStablePeriodMs / 1000) * RESAMPLE_HZ));
+    const adaptiveWindow = Math.min(9, Math.max(3, Math.round(periodSamplesStable / 20)));
+    const sig = movingAverage(sigRaw, adaptiveWindow);
+
+    // extract the most recent cycle from the adaptively-smoothed signal
+    const cycleLenSamples = Math.min(periodSamplesStable, sig.length);
     const cycleRaw = sig.slice(sig.length - cycleLenSamples);
     const cycle = new Float32Array(CYCLE_POINTS);
     for (let i = 0; i < CYCLE_POINTS; i++) {
@@ -461,6 +468,9 @@
     outAmp.textContent = amplitude.toFixed(0);
     outNoise.textContent = noisePct.toFixed(1) + '%';
     outNoise.classList.toggle('warn', noisePct > 25);
+
+    // save the cleaned signal so drawScope() can overlay it on the raw trace
+    scopeOverlay = { sig, t0: bufferT0, dt: 1000 / RESAMPLE_HZ };
   }
 
   // ---- oscilloscope render ----
@@ -484,7 +494,8 @@
     const tSpan = (t1 - t0) || 1;
 
     scopeCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--trace');
-    scopeCtx.lineWidth = 2;
+    scopeCtx.lineWidth = 1.5;
+    scopeCtx.globalAlpha = 0.55;
     scopeCtx.beginPath();
     buffer.forEach((p, i) => {
       const x = ((p.t - t0) / tSpan) * w;
@@ -492,6 +503,25 @@
       if (i === 0) scopeCtx.moveTo(x, y); else scopeCtx.lineTo(x, y);
     });
     scopeCtx.stroke();
+    scopeCtx.globalAlpha = 1;
+
+    // overlay the cleaned signal the classifier is actually using, so you can see
+    // how much filtering is happening relative to the raw trace above
+    if (scopeOverlay) {
+      const { sig, t0: ot0, dt } = scopeOverlay;
+      scopeCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--amber');
+      scopeCtx.lineWidth = 2;
+      scopeCtx.beginPath();
+      let started = false;
+      for (let i = 0; i < sig.length; i++) {
+        const t = ot0 + i * dt;
+        if (t < t0 || t > t1) continue;
+        const x = ((t - t0) / tSpan) * w;
+        const y = h - ((sig[i] - min) / range) * (h * 0.85) - h * 0.075;
+        if (!started) { scopeCtx.moveTo(x, y); started = true; } else { scopeCtx.lineTo(x, y); }
+      }
+      scopeCtx.stroke();
+    }
   }
 
   startBtn.addEventListener('click', () => running ? stopCamera() : startCamera());
@@ -502,6 +532,7 @@
     periodHistory = [];
     shapeHistory = [];
     transitionCounter = 0;
+    scopeOverlay = null;
     outWave.textContent = '--'; outFreq.textContent = '--'; outAmp.textContent = '--'; outNoise.textContent = '--';
   });
 
